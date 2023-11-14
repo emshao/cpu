@@ -115,14 +115,13 @@ module processor(
     assign PC_Fetch = (q_imem[31:27] == 5'b00001 | q_imem[31:27] == 5'b00011) ? {5'b0, q_imem[26:0]} : PCplus1; // just for Jump
 
 
-
+    // wire [31:0] PC_forJR = isJR_x ? 0 : PC_Fetch;
     
 
 
-    // assign pc_next = isJR_x ? PC_Execute : PC_Fetch;
+    assign pc_next = isJR_d ? intoDataB : PC_Fetch;
 
     assign intoPC = reset ? 32'b0 : pc_next; // change for jumps
-
 
 
     wire [31:0] PCplus1_d, PCplus1_x, PCplus1_m, PCplus1_w;
@@ -137,13 +136,13 @@ module processor(
 
     // check if should flush or stall logic here
     // assign instInDecode = (stalling | branching) ? 0 : instInFD; // create nop
-    assign instInDecode = instInFD;
+    // assign instInDecode = instInFD;
 
     wire [4:0] opcode_d, rd_d, rs_d, rt_d;
 
 
     // decode stage 
-    assign {opcode_d, rd_d, rs_d, rt_d} = instInDecode[31:12];
+    assign {opcode_d, rd_d, rs_d, rt_d} = instInFD[31:12];
 
     wire isBNE_d, isBLT_d, isJAL_d, isBEX_d, isSW_d, isJR_d;
 
@@ -158,11 +157,13 @@ module processor(
     assign ctrl_readRegA = isBEX_d ? 30 : rs_d;
     assign ctrl_readRegB = (isJR_d | isSW_d | isBNE_d | isBLT_d) ? rd_d : rt_d;                  // immediately has dataB
 
-    assign pc_next = isJR_d ? data_readRegB : PC_Fetch;
-    // assign PC_Decode = isJR_x ? 0 : PC_latchDX;
+    // assign pc_next = isJR_d ? q_dmem : PC_Fetch;
+    // assign PC_Decode = isJR_x ? 0 : PC_latchFD;
     
 
     /*********************************stall*******************************/
+    assign instInDecode = isJR_x ? 0 : instInFD;
+
 
 
 
@@ -176,7 +177,7 @@ module processor(
     wire [31:0] dataA_x, dataB_x, instInExecute;
 
     // DX latches
-    gRegister #(32) PC_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(PC_latchFD), .out_data(PC_latchDX), .reset(reset));
+    gRegister #(32) PC_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(PC_Decode), .out_data(PC_latchDX), .reset(reset));
     gRegister #(32) IN_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(instInDecode), .out_data(instInExecute), .reset(reset));
 
     gRegister #(32) DXRegA (.clk(~clock), .in_en(1'b1), .in_data(data_readRegA), .out_data(dataA_x), .reset(reset));
@@ -193,6 +194,9 @@ module processor(
     wire [4:0] opcode_x, rd_x, rs_x, rt_x;
     assign {opcode_x, rd_x, rs_x, rt_x} = instInExecute[31:12];
 
+    
+    assign PC_Execute = isJR_d ? intoDataB : PC_latchDX;
+
 
     assign isSW_x = (opcode_x == 5'b00111);
     assign isLW_x = (opcode_x == 5'b01000);
@@ -204,7 +208,6 @@ module processor(
     assign isJR_x = (opcode_x == 5'b00100);
     
     
-    assign PC_Execute = isJR_x ? dataB_x : PC_latchDX;
 
     wire [4:0] subtract = isBLT_x ? 5'b00001 : instInExecute[6:2];      // check if subtraction needed
     wire addImmediate = (isADDI_x | isSW_x | isLW_x);
@@ -232,7 +235,8 @@ module processor(
     wire [31:0] intoDataA = ((rd_m != 5'b00000) &(rd_m == rs_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassA;
     wire [31:0] prevBypassB = ((rd_w != 5'b00000) & (rd_w == rt_x) & (opcode_x != 5'b00111)) ? data_writeReg : dataB_x;
     wire [31:0] prevBypassB2 = ((rd_m != 5'b00000) & (rd_m == rt_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassB;
-    wire [31:0] intoDataB = addImmediate ? immediate_x : prevBypassB2;
+    wire [31:0] prevBypassB3 = ((rd_x == rd_d) & (opcode_d == 5'b00100)) ? aluOUT : prevBypassB2;
+    wire [31:0] intoDataB = addImmediate ? immediate_x : prevBypassB3;
     
     // stall?
     wire isDoingMult = isALU_x & (ALUop_x == 5'b00110);
@@ -278,9 +282,8 @@ module processor(
     wire [31:0] instInXM = stalling ? 32'b0 : inst_exp5; // pushing a nop through the rest of stalling
 
 
-
-
-
+    
+    // assign PC_Execute = isJR_x ? intoDataB : PC_latchDX;
 
     // XM latches
     wire [31:0] instInMemory, dataFromALU_m, dataB_m;
@@ -342,7 +345,7 @@ module processor(
     assign ctrl_writeReg = isJAL_w ? 31 : instInWrite[26:22];
     wire [31:0] fromALU = isJAL_w ? PCplus1_w : dataFromALU_w;
     assign data_writeReg = isLW_w ? dataFromMEM_w : fromALU;
-    assign ctrl_writeEnable = (isALU_w | isADDI_w | isJAL_w | isSETX_w | isLW_w | isJR_w);
+    assign ctrl_writeEnable = (isALU_w | isADDI_w | isJAL_w | isSETX_w | isLW_w);
 
 
 
