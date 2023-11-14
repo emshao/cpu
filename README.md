@@ -1,8 +1,9 @@
 # Processor
 ## NAME
-Emily Shao (eys9)
+Emily Shao
 
 ## Description of Design
+Processor
 
 ## Bypassing
 
