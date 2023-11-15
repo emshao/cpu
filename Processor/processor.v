@@ -109,7 +109,7 @@ module processor(
 
     gRegister #(32) PC_F (.clk(~clock), .in_en(~stalling), .in_data(intoPC), .out_data(curPC), .reset(reset)); // storing current PC
 
-    assign address_imem = isBEX_x ? 0 : curPC; // assume you automatically get q_imem
+    assign address_imem = (isBEX_x | isBNE_x | isBLT_x) ? 0 : curPC; // assume you automatically get q_imem
 
 
     adder PCadd1(.A(curPC), .B(0), .C0(1'b1), .sum(PCplus1), .overflow());
@@ -119,8 +119,8 @@ module processor(
 
     // wire [31:0] PC_forJR = isJR_x ? 0 : PC_Fetch;
     
-
-    wire [31:0] pc_bex_change = isBEX_x ? PC_bex : PC_Fetch;
+    wire [31:0] pc_bne_change = (isBNE_x | isBLT_x) ? PC_bne : PC_Fetch;
+    wire [31:0] pc_bex_change = isBEX_x ? PC_bex : pc_bne_change;
     assign pc_next = isJR_d ? intoDataB : pc_bex_change;
 
     assign intoPC = reset ? 32'b0 : pc_next; // change for jumps
@@ -162,14 +162,10 @@ module processor(
     assign ctrl_readRegB = (isJR_d | isSW_d | isBNE_d | isBLT_d) ? rd_d : rt_d;                  // immediately has dataB
     
 
-    /*********************************stall*******************************/
-    wire [31:0] instInD = (isJR_x | isBEX_x) ? 0 : instInFD;
+    /*********************************Push nop through*******************************/
+    wire [31:0] instInD = (isJR_x | isBEX_x | isBLT_x | isBNE_x) ? 0 : instInFD;
 
 
-
-
-    // fast branch logic here?
-    /*********************************fast branch*******************************/
 
 
 
@@ -187,32 +183,37 @@ module processor(
     
     gRegister #(32) pc1_d (.clk(~clock), .in_en(~stalling), .in_data(PCplus1_d), .out_data(PCplus1_x), .reset(reset));
 
-
     // execute stage
 
-    wire isBLT_x, isJAL_x, isSW_x, isLW_x, isADDI_x, isALU_x;
+    wire isBNE_x, isBLT_x, isJAL_x, isSW_x, isLW_x, isADDI_x, isALU_x;
+
+    wire [31:0] mdOUT, aluOUT, addiOUT;
+    wire mdExcept, mdReady;
+    wire aluNE, aluLT, aluOVF;
 
     wire [4:0] opcode_x, rd_x, rs_x, rt_x;
     assign {opcode_x, rd_x, rs_x, rt_x} = instInExecute[31:12];
 
     wire isBEX_x = ((opcode_x==5'b10110) & (dataA_x != 32'b0)) | ((opcode_x==5'b10110) & (rd_m==5'b11110) & (dataFromALU_m != 32'b0)) | ((opcode_x==5'b10110) & (rd_w==5'b11110));
+    assign isBNE_x = (opcode_x == 5'b00010) & aluNE;
+    assign isBLT_x = (opcode_x == 5'b00110) & (~aluOUT[31] & |(aluOUT));
+
+
+    wire [31:0] PCplus1plusN;
+    adder findPC1N(.A(PC_latchDX), .B(immediate_x), .C0(1'b0), .sum(PCplus1plusN), .overflow());
 
     wire [31:0] PC_bex = isBEX_x ? {5'b0, instInExecute[26:0]} : PC_latchDX;
+    wire [31:0] PC_bne = (isBNE_x | isBLT_x) ? PCplus1plusN : PC_latchDX;
 
     assign isSW_x = (opcode_x == 5'b00111);
     assign isLW_x = (opcode_x == 5'b01000);
     assign isADDI_x = (opcode_x == 5'b00101);
     assign isALU_x = (opcode_x == 5'b00000);
 
-    assign isBLT_x = (opcode_x == 5'b00110);
     assign isJAL_x = (opcode_x == 5'b00011);
     assign isJR_x = (opcode_x == 5'b00100);
 
-    
-    
-    
-
-    wire [4:0] subtract = isBLT_x ? 5'b00001 : instInExecute[6:2];      // check if subtraction needed
+    wire [4:0] subtract = (opcode_x == 5'b00110) ? 5'b00001 : instInExecute[6:2];      // check if subtraction needed
     wire addImmediate = (isADDI_x | isSW_x | isLW_x);
     wire [4:0] ALUop_x = addImmediate ? 5'b00000 : subtract; // check if adding immediate needed
 
@@ -221,27 +222,19 @@ module processor(
     wire [31:0] immediate_x = {{15{instInExecute[16]}}, instInExecute[16:0]};
 
 
-
-
-
-
-
-    wire [31:0] mdOUT, aluOUT, addiOUT;
-    wire mdExcept, mdReady;
-    wire aluNE, aluLT, aluOVF;
-
     wire [31:0] dataForWriteReg;
-
+    wire [4:0] opcode_m;
 
     // // bypass
     wire [31:0] prevBypassA = ((rd_w != 5'b00000) & (rd_w == rs_x) & (opcode_x != 5'b00111)) ? data_writeReg : dataA_x;
     wire [31:0] prevBypassA2 = ((rd_m != 5'b00000) &(rd_m == rs_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassA;
-    wire [31:0] intoDataA = ((rs_x == rd_w) & (opcode_x == 5'b00111) & (opcode_w != 5'b00111)) ? data_writeReg : prevBypassA2;
+    wire [31:0] intoDataA = ((rs_x == rd_w) & (opcode_x == 5'b00111 | opcode_x == 5'b00110) & (opcode_w != 5'b00111)) ? data_writeReg : prevBypassA2;
 
     wire [31:0] prevBypassB = ((rd_w != 5'b00000) & (rd_w == rt_x) & (opcode_x != 5'b00111)) ? data_writeReg : dataB_x;
-    wire [31:0] prevBypassB2 = ((rd_m != 5'b00000) & (rd_m == rt_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassB;
-    wire [31:0] prevBypassB3 = ((rd_x == rd_d) & (opcode_d == 5'b00100)) ? aluOUT : prevBypassB2;
-    wire [31:0] intoDataB = addImmediate ? immediate_x : prevBypassB3;
+    wire [31:0] prevBypassB2 = ((rd_m != 5'b00000) & (rd_m == rt_x) & (opcode_x != 5'b00111 | opcode_m != 5'b00110)) ? dataFromALU_m : prevBypassB;
+    wire [31:0] prevBypassB3 = ((rd_x == rd_d) & (opcode_d == 5'b00100 | opcode_x == 5'b00110)) ? aluOUT : prevBypassB2;
+    wire [31:0] prevBypassB4 = ((rd_m == rd_x) & (opcode_x == 5'b00110)) ? dataFromALU_m : prevBypassB3;
+    wire [31:0] intoDataB = addImmediate ? immediate_x : prevBypassB4;
     
     // stall?
     wire isDoingMult = isALU_x & (ALUop_x == 5'b00110);
@@ -255,10 +248,6 @@ module processor(
     wire ctrl_mult = isDoingMult & ~dff_mOut;
     wire ctrl_div = isDoingDiv & ~dff_dOut;
     assign stalling = (dff_mOut | dff_dOut);
-
-
-    
-    
 
     multdiv multiplier(.data_operandA(intoDataA), .data_operandB(intoDataB), .ctrl_MULT(ctrl_mult), .ctrl_DIV(ctrl_div), .clock(~clock), .data_result(mdOUT), .data_exception(mdExcept), .data_resultRDY(mdReady));
     // assign mdOut = 32'b0;
@@ -288,6 +277,14 @@ module processor(
 
 
     
+
+
+
+
+
+
+
+
     // assign PC_Execute = isJR_x ? intoDataB : PC_latchDX;
 
     // XM latches
@@ -301,7 +298,7 @@ module processor(
     gRegister #(32) pc1_m (.clk(~clock), .in_en(~stalling), .in_data(PCplus1_x), .out_data(PCplus1_m), .reset(reset));
 
     // memory stage 
-    wire [4:0] opcode_m, rd_m, rs_m, rt_m;
+    wire [4:0] rd_m, rs_m, rt_m;
     assign {opcode_m, rd_m, rs_m, rt_m} = instInMemory[31:12];
 
     wire storeWord = (opcode_m==5'b00111);
