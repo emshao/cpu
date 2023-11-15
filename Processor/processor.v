@@ -108,18 +108,20 @@ module processor(
     // fetch stage -- assign PC at the end
 
     gRegister #(32) PC_F (.clk(~clock), .in_en(~stalling), .in_data(intoPC), .out_data(curPC), .reset(reset)); // storing current PC
-    assign address_imem = curPC; // assume you automatically get q_imem
+
+    assign address_imem = isBEX_x ? 0 : curPC; // assume you automatically get q_imem
 
 
     adder PCadd1(.A(curPC), .B(0), .C0(1'b1), .sum(PCplus1), .overflow());
+
     assign PC_Fetch = (q_imem[31:27] == 5'b00001 | q_imem[31:27] == 5'b00011) ? {5'b0, q_imem[26:0]} : PCplus1; // just for Jump
 
 
     // wire [31:0] PC_forJR = isJR_x ? 0 : PC_Fetch;
     
 
-
-    assign pc_next = isJR_d ? intoDataB : PC_Fetch;
+    wire [31:0] pc_bex_change = isBEX_x ? PC_bex : PC_Fetch;
+    assign pc_next = isJR_d ? intoDataB : pc_bex_change;
 
     assign intoPC = reset ? 32'b0 : pc_next; // change for jumps
 
@@ -128,15 +130,17 @@ module processor(
 
 
     // FD latches -- store PCnext and instruction
-    wire [31:0] instInFD, instInDecode;
+    wire [31:0] instInDecode;
     gRegister #(32) PC_FDlatch (.clk(~clock), .in_en(~stalling), .in_data(PC_Fetch), .out_data(PC_latchFD), .reset(reset)); // why do I need to save this throughout all 5?
-    gRegister #(32) IN_FDlatch (.clk(~clock), .in_en(~stalling), .in_data(q_imem), .out_data(instInFD), .reset(reset));
+    gRegister #(32) IN_FDlatch (.clk(~clock), .in_en(~stalling), .in_data(q_imem), .out_data(instInDecode), .reset(reset));
     gRegister #(32) pc1_f (.clk(~clock), .in_en(~stalling), .in_data(PCplus1), .out_data(PCplus1_d), .reset(reset));
     
 
     // check if should flush or stall logic here
-    // assign instInDecode = (stalling | branching) ? 0 : instInFD; // create nop
-    // assign instInDecode = instInFD;
+
+    wire [31:0] instInFD = (instInDecode[31:27] == 5'b10101) ? {15'b001011111000000, instInDecode[16:0]} : instInDecode;
+
+
 
     wire [4:0] opcode_d, rd_d, rs_d, rt_d;
 
@@ -156,13 +160,10 @@ module processor(
 
     assign ctrl_readRegA = isBEX_d ? 30 : rs_d;
     assign ctrl_readRegB = (isJR_d | isSW_d | isBNE_d | isBLT_d) ? rd_d : rt_d;                  // immediately has dataB
-
-    // assign pc_next = isJR_d ? q_dmem : PC_Fetch;
-    // assign PC_Decode = isJR_x ? 0 : PC_latchFD;
     
 
     /*********************************stall*******************************/
-    assign instInDecode = isJR_x ? 0 : instInFD;
+    wire [31:0] instInD = (isJR_x | isBEX_x) ? 0 : instInFD;
 
 
 
@@ -177,8 +178,8 @@ module processor(
     wire [31:0] dataA_x, dataB_x, instInExecute;
 
     // DX latches
-    gRegister #(32) PC_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(PC_Decode), .out_data(PC_latchDX), .reset(reset));
-    gRegister #(32) IN_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(instInDecode), .out_data(instInExecute), .reset(reset));
+    gRegister #(32) PC_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(PC_latchFD), .out_data(PC_latchDX), .reset(reset));
+    gRegister #(32) IN_DXlatch (.clk(~clock), .in_en(~stalling), .in_data(instInD), .out_data(instInExecute), .reset(reset));
 
     gRegister #(32) DXRegA (.clk(~clock), .in_en(1'b1), .in_data(data_readRegA), .out_data(dataA_x), .reset(reset));
     gRegister #(32) DXRegB (.clk(~clock), .in_en(1'b1), .in_data(data_readRegB), .out_data(dataB_x), .reset(reset));
@@ -194,9 +195,9 @@ module processor(
     wire [4:0] opcode_x, rd_x, rs_x, rt_x;
     assign {opcode_x, rd_x, rs_x, rt_x} = instInExecute[31:12];
 
-    
-    assign PC_Execute = isJR_d ? intoDataB : PC_latchDX;
+    wire isBEX_x = ((opcode_x==5'b10110) & (dataA_x != 32'b0)) | ((opcode_x==5'b10110) & (rd_m==5'b11110) & (dataFromALU_m != 32'b0)) | ((opcode_x==5'b10110) & (rd_w==5'b11110));
 
+    wire [31:0] PC_bex = isBEX_x ? {5'b0, instInExecute[26:0]} : PC_latchDX;
 
     assign isSW_x = (opcode_x == 5'b00111);
     assign isLW_x = (opcode_x == 5'b01000);
@@ -206,6 +207,8 @@ module processor(
     assign isBLT_x = (opcode_x == 5'b00110);
     assign isJAL_x = (opcode_x == 5'b00011);
     assign isJR_x = (opcode_x == 5'b00100);
+
+    
     
     
 
@@ -232,7 +235,9 @@ module processor(
 
     // // bypass
     wire [31:0] prevBypassA = ((rd_w != 5'b00000) & (rd_w == rs_x) & (opcode_x != 5'b00111)) ? data_writeReg : dataA_x;
-    wire [31:0] intoDataA = ((rd_m != 5'b00000) &(rd_m == rs_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassA;
+    wire [31:0] prevBypassA2 = ((rd_m != 5'b00000) &(rd_m == rs_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassA;
+    wire [31:0] intoDataA = ((rs_x == rd_w) & (opcode_x == 5'b00111) & (opcode_w != 5'b00111)) ? data_writeReg : prevBypassA2;
+
     wire [31:0] prevBypassB = ((rd_w != 5'b00000) & (rd_w == rt_x) & (opcode_x != 5'b00111)) ? data_writeReg : dataB_x;
     wire [31:0] prevBypassB2 = ((rd_m != 5'b00000) & (rd_m == rt_x) & (opcode_x != 5'b00111)) ? dataFromALU_m : prevBypassB;
     wire [31:0] prevBypassB3 = ((rd_x == rd_d) & (opcode_d == 5'b00100)) ? aluOUT : prevBypassB2;
@@ -302,13 +307,17 @@ module processor(
     wire storeWord = (opcode_m==5'b00111);
     wire loadWord = (opcode_m==5'b01000);
 
-    // bypass
-    wire [31:0] dataToStore = ((rd_w == rs_m) & (storeWord | loadWord)) ? data_writeReg : dataFromALU_m;
 
     // write to memory
     assign wren = storeWord;
     assign address_dmem = dataFromALU_m; // assume you get q_dmem immediately
-    assign data = storeWord ? dataB_m : 0;
+
+
+    // bypass
+    wire [31:0] dataToStore = storeWord ? dataB_m : 0;
+    assign data = ((rd_w == rd_m) & (storeWord | loadWord)) ? data_writeReg : dataToStore;
+    
+    
 
     
 
